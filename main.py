@@ -1,49 +1,74 @@
 import streamlit as st
-import json
 import datetime
-from app.drive import get_monthly_transactions
+import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# === Streamlit app for Hishob Dashboard ===
-st.write("Loading credentials...")
-try:
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["credentials_json"], scope)
-    client = gspread.authorize(creds)
-    st.success("Credentials loaded and authorized.")
+# === AUTH & GOOGLE SHEETS SETUP ===
+@st.cache_resource
+def load_gsheet():
+    try:
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            st.secrets["credentials_json"], scope
+        )
+        client = gspread.authorize(creds)
+        sheet = client.open(st.secrets["spreadsheet_name"])
+        return sheet
+    except Exception as e:
+        st.error("❌ Failed to connect to Google Sheets.")
+        st.stop()
 
-    spreadsheet_name = st.secrets["spreadsheet_name"]
-    sheet = client.open(spreadsheet_name)
-    st.success(f"Sheet '{spreadsheet_name}' opened successfully.")
-except Exception as e:
-    st.error(f"Error loading Google Sheet: {e}")
+# === LOAD DATA FOR CURRENT MONTH ===
+def load_current_month_data(sheet):
+    tab = datetime.datetime.now().strftime("%b-%Y")
+    try:
+        worksheet = sheet.worksheet(tab)
+        data = worksheet.get_all_records()
+        return pd.DataFrame(data)
+    except Exception:
+        st.warning(f"No data found for tab: {tab}")
+        return pd.DataFrame()
 
-st.set_page_config(page_title="Hishob Dashboard", layout="wide")
+# === DASHBOARD ===
+def show_summary(df):
+    st.subheader("📊 Hishob - Personal Finance Dashboard")
 
-st.title("📊 Hishob - Personal Finance Dashboard")
-
-# === Load secrets ===
-creds_str = st.secrets["credentials_json"]
-spreadsheet_name = st.secrets["spreadsheet_name"]
-
-try:
-    credentials = json.loads(creds_str)
-except Exception as e:
-    st.error("Error parsing credentials.")
-    st.stop()
-
-# === Current month ===
-now = datetime.datetime.now()
-month_tab = now.strftime("%b-%Y")
-
-# === Load transactions ===
-try:
-    df = get_monthly_transactions(spreadsheet_name, credentials, month_tab)
     if df.empty:
-        st.info("No active transactions for this month.")
-    else:
-        st.success(f"{len(df)} active transactions loaded.")
-        st.dataframe(df, use_container_width=True)
-except Exception as e:
-    st.error(f"Error fetching data: {str(e)}")
+        st.info("No transactions found.")
+        return
+
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+
+    # Filter active entries only
+    df = df[df["active"] == "Y"]
+
+    total_spent = df[df["entry_type"] == "debit"]["amount"].sum()
+    total_income = df[df["entry_type"] == "credit"]["amount"].sum()
+
+    st.metric("Total Spent", f"₹{total_spent:,.2f}")
+    st.metric("Total Income", f"₹{total_income:,.2f}")
+
+    # Category-wise summary
+    category_summary = df.groupby("category", dropna=False)["amount"].sum().sort_values(ascending=False)
+    st.bar_chart(category_summary)
+
+    # Show latest transactions
+    st.subheader("🧾 Latest Transactions")
+    st.dataframe(df.sort_values("datetime", ascending=False).head(10), use_container_width=True)
+
+# === MAIN ===
+def main():
+    st.title("💸 Hishob Dashboard")
+
+    sheet = load_gsheet()
+    df = load_current_month_data(sheet)
+
+    show_summary(df)
+
+if __name__ == "__main__":
+    main()
